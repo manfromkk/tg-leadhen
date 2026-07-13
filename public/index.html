@@ -27,6 +27,14 @@
   .row { display: flex; gap: 8px; }
   .row > div { flex: 1; }
   .req::after { content: ' *'; color: #e2574c; }
+  #slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 4px; }
+  .slot {
+    padding: 10px 0; border: none; border-radius: 9px; background: var(--field);
+    color: var(--fg); font-size: 14px; text-align: center;
+  }
+  .slot:disabled { opacity: .32; text-decoration: line-through; }
+  .slot.sel { background: var(--btn); color: var(--btnfg); font-weight: 600; }
+  .slotmsg { color: var(--hint); font-size: 13px; margin-top: 6px; }
   #result { margin-top: 16px; padding: 12px; border-radius: 10px; background: var(--field); display: none; font-size: 14px; word-break: break-all; }
   #result a { color: var(--btn); }
   #sendbtn {
@@ -39,7 +47,7 @@
 </head>
 <body>
   <h1>Заявка на встречу</h1>
-  <div class="sub">Встреча появится в календаре Александра, клиенту уйдёт приглашение с Google Meet.</div>
+  <div class="sub">Встреча появится в календаре Александра, клиенту уйдёт приглашение с Google Meet. Рабочее окно: 8:00–17:00.</div>
 
   <label class="req">Клиент (компания / имя)</label>
   <input id="client" placeholder="ТОО «Компания», Марат">
@@ -53,13 +61,6 @@
       <input id="date" type="date">
     </div>
     <div>
-      <label class="req">Время</label>
-      <input id="time" type="time">
-    </div>
-  </div>
-
-  <div class="row">
-    <div>
       <label>Длительность</label>
       <select id="dur">
         <option value="15">15 мин</option>
@@ -68,6 +69,13 @@
         <option value="60">60 мин</option>
       </select>
     </div>
+  </div>
+
+  <label class="req">Время (свободные слоты)</label>
+  <div id="slots"></div>
+  <div class="slotmsg" id="slotmsg">Выбери дату — покажу свободные окна.</div>
+
+  <div class="row">
     <div>
       <label>Источник</label>
       <select id="src">
@@ -78,16 +86,17 @@
         <option>Другое</option>
       </select>
     </div>
+    <div>
+      <label>Продукт интереса</label>
+      <select id="prod">
+        <option value="">—</option>
+        <option>VOC Platform</option>
+        <option>NPS+</option>
+        <option>Оба</option>
+        <option>Уточнить</option>
+      </select>
+    </div>
   </div>
-
-  <label>Продукт интереса</label>
-  <select id="prod">
-    <option value="">—</option>
-    <option>VOC Platform</option>
-    <option>NPS+</option>
-    <option>Оба</option>
-    <option>Уточнить</option>
-  </select>
 
   <label>Тема / заметка</label>
   <textarea id="topic" placeholder="Одной строкой: что за клиент, какая боль"></textarea>
@@ -99,15 +108,100 @@
   var tg = window.Telegram.WebApp;
   tg.ready(); tg.expand();
 
+  var WORK_START = 8 * 60;   // 8:00
+  var WORK_END   = 17 * 60;  // 17:00 — конец последней встречи
+  var STEP = 30;             // шаг сетки, мин
+  var TZ_OFFSET = '+05:00';  // Алматы
+
   var btn = document.getElementById('sendbtn');
   var box = document.getElementById('result');
+  var slotsEl = document.getElementById('slots');
+  var slotMsg = document.getElementById('slotmsg');
+  var dateEl = document.getElementById('date');
+  var durEl = document.getElementById('dur');
+
+  var busy = [];        // [{startMs, endMs}]
+  var selectedTime = ''; // 'HH:MM'
+
+  // нельзя выбрать прошедшую дату
+  (function () {
+    var now = new Date(Date.now() + 5 * 3600 * 1000); // алматинское "сегодня"
+    dateEl.min = now.toISOString().slice(0, 10);
+  })();
 
   function v(id) { return document.getElementById(id).value.trim(); }
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function mmToHHMM(m) { return pad(Math.floor(m / 60)) + ':' + pad(m % 60); }
+
+  async function loadSlots() {
+    selectedTime = '';
+    slotsEl.innerHTML = '';
+    var d = v('date');
+    if (!d) { slotMsg.textContent = 'Выбери дату — покажу свободные окна.'; return; }
+    slotMsg.textContent = 'Смотрю календарь…';
+    try {
+      var r = await fetch('/api/slots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: tg.initData, date: d })
+      });
+      var data = await r.json();
+      if (!data.ok) { slotMsg.textContent = '⚠️ ' + (data.error || 'не получил календарь'); return; }
+      busy = (data.busy || []).map(function (b) {
+        return { s: new Date(b.start).getTime(), e: new Date(b.end).getTime() };
+      });
+      renderSlots();
+    } catch (e) {
+      slotMsg.textContent = '⚠️ Ошибка сети: ' + e.message;
+    }
+  }
+
+  function renderSlots() {
+    slotsEl.innerHTML = '';
+    var d = v('date');
+    if (!d) return;
+    var dur = Number(v('dur')) || 30;
+    var dayStart = new Date(d + 'T00:00:00' + TZ_OFFSET).getTime();
+    var now = Date.now();
+    var free = 0;
+
+    for (var t = WORK_START; t + dur <= WORK_END; t += STEP) {
+      var sMs = dayStart + t * 60000;
+      var eMs = sMs + dur * 60000;
+      var isBusy = busy.some(function (b) { return sMs < b.e && eMs > b.s; });
+      var isPast = sMs < now;
+
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'slot';
+      b.textContent = mmToHHMM(t);
+      b.disabled = isBusy || isPast;
+      if (!b.disabled) {
+        free++;
+        (function (timeStr, el) {
+          el.addEventListener('click', function () {
+            selectedTime = timeStr;
+            var all = slotsEl.querySelectorAll('.slot');
+            for (var i = 0; i < all.length; i++) all[i].classList.remove('sel');
+            el.classList.add('sel');
+            tg.HapticFeedback && tg.HapticFeedback.selectionChanged();
+          });
+        })(mmToHHMM(t), b);
+      }
+      slotsEl.appendChild(b);
+    }
+    slotMsg.textContent = free
+      ? 'Свободных окон: ' + free + '. Зачёркнутые — заняты или прошли.'
+      : 'На эту дату свободных окон нет — выбери другой день.';
+  }
+
+  dateEl.addEventListener('change', loadSlots);
+  durEl.addEventListener('change', renderSlots);
 
   btn.addEventListener('click', async function () {
-    if (!v('client') || !v('date') || !v('time')) {
+    if (!v('client') || !v('date') || !selectedTime) {
       box.style.display = 'block';
-      box.textContent = 'Заполни обязательные поля: клиент, дата, время.';
+      box.textContent = 'Заполни: клиент, дата и выбери свободный слот времени.';
       tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('error');
       return;
     }
@@ -122,7 +216,7 @@
           initData: tg.initData,
           payload: {
             client: v('client'), email: v('email'),
-            date: v('date'), time: v('time'),
+            date: v('date'), time: selectedTime,
             dur: Number(v('dur')) || 30,
             src: v('src'), prod: v('prod'), topic: v('topic')
           }
@@ -131,11 +225,12 @@
       var data = await r.json();
       box.style.display = 'block';
       if (data.ok) {
-        box.innerHTML = '✅ Встреча создана.' +
+        box.innerHTML = '✅ Встреча создана: ' + v('date') + ' в ' + selectedTime + '.' +
           (data.meet ? '<br>🎥 Meet: <a href="' + data.meet + '">' + data.meet + '</a>' : '') +
           '<br><br>Можно закрыть окно или создать ещё одну.';
         tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('success');
         ['client','email','topic'].forEach(function(id){ document.getElementById(id).value=''; });
+        loadSlots(); // обновить сетку — только что занятый слот станет недоступен
       } else {
         box.textContent = '⚠️ ' + (data.status || data.error || 'Не получилось, попробуй ещё раз.');
         tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('error');
