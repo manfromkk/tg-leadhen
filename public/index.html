@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Заявка на встречу</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #fff);
+    --fg: var(--tg-theme-text-color, #111);
+    --hint: var(--tg-theme-hint-color, #888);
+    --btn: var(--tg-theme-button-color, #2481cc);
+    --btnfg: var(--tg-theme-button-text-color, #fff);
+    --field: var(--tg-theme-secondary-bg-color, #f2f2f7);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.45 -apple-system, Roboto, sans-serif; padding: 16px 16px 96px; }
+  h1 { font-size: 19px; margin-bottom: 4px; }
+  .sub { color: var(--hint); font-size: 13px; margin-bottom: 16px; }
+  label { display: block; font-size: 13px; color: var(--hint); margin: 12px 0 4px; }
+  input, select, textarea {
+    width: 100%; border: none; border-radius: 10px; background: var(--field);
+    color: var(--fg); padding: 12px; font-size: 16px; outline: none;
+  }
+  textarea { resize: none; height: 68px; }
+  .row { display: flex; gap: 8px; }
+  .row > div { flex: 1; }
+  .req::after { content: ' *'; color: #e2574c; }
+  #result { margin-top: 16px; padding: 12px; border-radius: 10px; background: var(--field); display: none; font-size: 14px; word-break: break-all; }
+  #result a { color: var(--btn); }
+  #sendbtn {
+    position: fixed; left: 16px; right: 16px; bottom: 16px; padding: 14px;
+    border: none; border-radius: 12px; background: var(--btn); color: var(--btnfg);
+    font-size: 16px; font-weight: 600;
+  }
+  #sendbtn:disabled { opacity: .55; }
+</style>
+</head>
+<body>
+  <h1>Заявка на встречу</h1>
+  <div class="sub">Встреча появится в календаре Александра, клиенту уйдёт приглашение с Google Meet.</div>
+
+  <label class="req">Клиент (компания / имя)</label>
+  <input id="client" placeholder="ТОО «Компания», Марат">
+
+  <label>Email клиента</label>
+  <input id="email" type="email" placeholder="client@company.kz — сюда уйдёт Meet">
+
+  <div class="row">
+    <div>
+      <label class="req">Дата</label>
+      <input id="date" type="date">
+    </div>
+    <div>
+      <label class="req">Время</label>
+      <input id="time" type="time">
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label>Длительность</label>
+      <select id="dur">
+        <option value="15">15 мин</option>
+        <option value="30" selected>30 мин</option>
+        <option value="45">45 мин</option>
+        <option value="60">60 мин</option>
+      </select>
+    </div>
+    <div>
+      <label>Источник</label>
+      <select id="src">
+        <option value="">—</option>
+        <option>Коммеск</option>
+        <option>Страховая</option>
+        <option>Дата-хаб</option>
+        <option>Другое</option>
+      </select>
+    </div>
+  </div>
+
+  <label>Продукт интереса</label>
+  <select id="prod">
+    <option value="">—</option>
+    <option>VOC Platform</option>
+    <option>NPS+</option>
+    <option>Оба</option>
+    <option>Уточнить</option>
+  </select>
+
+  <label>Тема / заметка</label>
+  <textarea id="topic" placeholder="Одной строкой: что за клиент, какая боль"></textarea>
+
+  <div id="result"></div>
+  <button id="sendbtn">Создать встречу</button>
+
+<script>
+  var tg = window.Telegram.WebApp;
+  tg.ready(); tg.expand();
+
+  var btn = document.getElementById('sendbtn');
+  var box = document.getElementById('result');
+
+  function v(id) { return document.getElementById(id).value.trim(); }
+
+  btn.addEventListener('click', async function () {
+    if (!v('client') || !v('date') || !v('time')) {
+      box.style.display = 'block';
+      box.textContent = 'Заполни обязательные поля: клиент, дата, время.';
+      tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('error');
+      return;
+    }
+    btn.disabled = true; btn.textContent = 'Создаю…';
+    box.style.display = 'none';
+
+    try {
+      var r = await fetch('/api/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          initData: tg.initData,
+          payload: {
+            client: v('client'), email: v('email'),
+            date: v('date'), time: v('time'),
+            dur: Number(v('dur')) || 30,
+            src: v('src'), prod: v('prod'), topic: v('topic')
+          }
+        })
+      });
+      var data = await r.json();
+      box.style.display = 'block';
+      if (data.ok) {
+        box.innerHTML = '✅ Встреча создана.' +
+          (data.meet ? '<br>🎥 Meet: <a href="' + data.meet + '">' + data.meet + '</a>' : '') +
+          '<br><br>Можно закрыть окно или создать ещё одну.';
+        tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('success');
+        ['client','email','topic'].forEach(function(id){ document.getElementById(id).value=''; });
+      } else {
+        box.textContent = '⚠️ ' + (data.status || data.error || 'Не получилось, попробуй ещё раз.');
+        tg.HapticFeedback && tg.HapticFeedback.notificationOccurred('error');
+      }
+    } catch (e) {
+      box.style.display = 'block';
+      box.textContent = '⚠️ Ошибка сети: ' + e.message;
+    }
+    btn.disabled = false; btn.textContent = 'Создать встречу';
+  });
+</script>
+</body>
+</html>

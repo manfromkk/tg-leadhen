@@ -1,0 +1,9 @@
+{
+  "name": "tg-leadgen",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Telegram-бот + Mini App заявок на встречи (Centras Alpha Lab)",
+  "dependencies": {
+    "grammy": "^1.30.0"
+  }
+}
